@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitHub Plugin Auto Upload",
+    "description": "Sync DSH plugins to private GitHub repos, one repo per plugin: incremental upload, auto repo creation, skip when unchanged, and one-command install back on a new machine."
+  }
+}

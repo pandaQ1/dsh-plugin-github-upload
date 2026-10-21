@@ -1,0 +1,28 @@
+{
+  "name": "dsh-plugin-github-upload",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "title": "GitHub插件自动上传",
+  "description": "把 DSH 插件（现有的、新做好的）自动同步到 GitHub 私有库：一个插件一个库，增量上传、首次自动建库、未改动自动跳过；换机器或重装后用 install 一键装回并挂进 DSH。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "assets/**",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

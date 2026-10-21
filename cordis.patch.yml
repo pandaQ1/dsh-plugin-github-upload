@@ -1,0 +1,5 @@
+# github_upload tool row (GitHub 私有库自动上传：一个插件一个库)
+- insert:
+    - id: github-upload
+      name: 'dsh-plugin-github-upload'
+      config: {}

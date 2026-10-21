@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="GitHub plugin auto upload">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0f0f0f" stroke="#3f3f46" stroke-width="2"/>
+  <!-- 仓库盒 -->
+  <g fill="none" stroke="#f4f4f5" stroke-width="2.2" stroke-linejoin="round">
+    <path d="M15 41V21.5c0-1.4 1.1-2.5 2.5-2.5h9.2l3 3h16.8c1.4 0 2.5 1.1 2.5 2.5V41c0 1.4-1.1 2.5-2.5 2.5h-29C16.1 43.5 15 42.4 15 41z"/>
+  </g>
+  <!-- 上传箭头 -->
+  <g fill="none" stroke="#4ade80" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 38.5V25"/>
+    <path d="M26.5 30.5 32 25l5.5 5.5"/>
+  </g>
+  <!-- 私有锁 -->
+  <g>
+    <rect x="38.5" y="33.5" width="12" height="9" rx="2.4" fill="#0f0f0f" stroke="#fbbf24" stroke-width="1.5"/>
+    <path d="M41.3 33.2v-2.1a3.1 3.1 0 0 1 6.2 0v2.1" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+  </g>
+</svg>
