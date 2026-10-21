@@ -71,7 +71,7 @@ async function pushOne(ctx, plugin, opts) {
   const { api, cfg, owner, reg, cfgDir, orgMode, me } = ctx;
   const repo = repoNameFor(plugin, cfg);
   const full = `${owner}/${repo}`;
-  const row = emptyRow(plugin, owner, cfg, { dryRun: !!opts.dryRun });
+  const row = emptyRow(plugin, owner, cfg, { dryRun: !!opts.dryRun, repoUrl: `https://github.com/${full}` });
 
   // 1) 本地清单（含 blob sha，可直接和远端比）
   const walk = opts.walk || await walkFiles(plugin.dir, { extraExcludes: cfg.exclude, maxFileMB: opts.maxFileMB || cfg.maxFileMB });
