@@ -64,13 +64,15 @@ GitHubAI插件自动上传/
 输出每个插件的建议仓库名、文件数、体积、是否已建库、是否有改动，以及被跳过的文件。
 
 ### push
-1. `GET /repos/{owner}/{repo}` → 不存在则 `POST /user/repos`（`private: true`，`auto_init: false`）
+1. `GET /repos/{owner}/{repo}` → 不存在则 `POST /user/repos`（`private: true`，`auto_init: true`）
+   > `auto_init` 是必须的：GitHub 对「没有任何提交的空库」会拒绝 blobs/trees 接口（`409 Git Repository is empty`）。
+   > 初始提交里的 README 会在下一步被插件自己的树覆盖。
 2. 读分支头 → 读 commit → 读递归树（path → blob sha）
 3. 本地算 git blob sha（`sha1("blob <len>\0" + content)`），逐个和远端比：
    - 相同 → 复用远端 sha（不传）
    - 不同 → `POST /git/blobs`（base64）
 4. `POST /git/trees`（全量树，天然带回删除）→ `POST /git/commits` → `PATCH /git/refs/heads/<branch>`
-5. 空库时用 `POST /git/refs` 建 `refs/heads/main`
+5. 库是你手动建的、且一个提交都没有时：先 `PUT /contents/README.md` 初始化（`initRepo: true`），再走第 3 步
 6. 写 `registry.json`，并同步仓库描述为「插件标题 · DSH 插件」
 
 同一插件第二次 push：`treeId` 相同 → **一次网络请求都不发**（`unchanged`）。
@@ -129,6 +131,7 @@ GitHubAI插件自动上传/
 | `令牌不可用：… 401` | PAT 失效 | 重新生成 → `auth` |
 | `403 Resource not accessible` | 权限不够 / 组织禁建库 | classic 用 `repo`；组织需允许创建 |
 | `422 Repository creation failed` | 同名库存在 | 改 `repoPrefix`/`owner`，或先删旧库 |
+| `409 Git Repository is empty` | 空库不能用 blobs/trees | 已自动处理（建库 `auto_init` + 空库用 Contents 初始化）；仍失败就在网页上先建 README |
 | push 成功但 GitHub 上没有文件 | 目标分支不是默认分支 | 看 `list` 里的 `branch`，或删库重来 |
 | 中文插件名报错 | GitHub 不允许非 ASCII 仓库名 | 在 `package.json` 里给 `name` 用 ASCII（本插件会自动兜底 `dsh-plugin`） |
 | `install` 卡住 | 令牌缺失且非 `file://` | 先 `auth`；或检查网络代理 |
@@ -140,8 +143,8 @@ GitHubAI插件自动上传/
 ## 7. 自测
 
 ```powershell
-node assets/selftest.mjs        # 本地 mock GitHub REST，跑建库/提交/增量/删除/dry-run/拦公开库/install/link
-node assets/selftest-index.mjs  # apply 注册、参数枚举、8 个动作的输出是否符合 output.schema
+node assets/selftest.mjs        # 本地 mock GitHub REST：建库/提交/增量/删除/dry-run/拦公开库/空库兜底/install/link/工具层，60 项
+node assets/selftest-index.mjs  # apply 注册、参数枚举、8 个动作的输出是否符合 output.schema，25 项
 ```
 
 `selftest.mjs --keep` 保留临时目录便于排查。

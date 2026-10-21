@@ -492,6 +492,42 @@ export function readmeFor(plugin, owner, repo) {
   ].filter((l) => l !== undefined).join("\n");
 }
 
+/* ───────────────── 自测用：JSON Schema 子集校验 ───────────────── */
+
+/** 校验工具输出是否符合 output.schema（type / required / properties / additionalProperties / items / enum） */
+export function validateAgainstSchema(schema, value, path = "$") {
+  const errors = [];
+  if (schema.enum && !schema.enum.includes(value)) errors.push(`${path}: ${JSON.stringify(value)} 不在 enum 里`);
+  const t = schema.type;
+  if (t) {
+    const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+    const checkers = {
+      integer: (v) => typeof v === "number" && Number.isInteger(v),
+      number: (v) => typeof v === "number" && Number.isFinite(v),
+      object: (v) => v !== null && typeof v === "object" && !Array.isArray(v),
+      array: Array.isArray,
+      string: (v) => typeof v === "string",
+      boolean: (v) => typeof v === "boolean",
+      null: (v) => v === null,
+    };
+    const ok = checkers[t] ? checkers[t](value) : actual === t;
+    if (!ok) errors.push(`${path}: 期望 ${t}，实际 ${actual}`);
+  }
+  if (Array.isArray(value) && schema.items) value.forEach((v, i) => errors.push(...validateAgainstSchema(schema.items, v, `${path}[${i}]`)));
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const k of schema.required || []) if (!(k in value)) errors.push(`${path}: 缺必填字段 ${k}`);
+    for (const [k, v] of Object.entries(value)) {
+      const sub = schema.properties && schema.properties[k];
+      if (!sub) {
+        if (schema.additionalProperties === false) errors.push(`${path}: 多余字段 ${k}`);
+        continue;
+      }
+      errors.push(...validateAgainstSchema(sub, v, `${path}.${k}`));
+    }
+  }
+  return errors;
+}
+
 /* ───────────────── DSH profile 挂载（link 进 profile） ───────────────── */
 
 /** 跑一条命令（收输出；令牌等敏感值只走 env） */

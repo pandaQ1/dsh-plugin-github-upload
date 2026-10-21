@@ -1,4 +1,4 @@
-// selftest-index.mjs — 校验 index.js 里的工具定义与输出契约（不联网、不写真实配置）
+﻿// selftest-index.mjs — 校验 index.js 里的工具定义与输出契约（不联网、不写真实配置）
 //
 //   node assets/selftest-index.mjs
 //
@@ -11,38 +11,15 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { validateAgainstSchema } from "./lib.mjs";
 
 const mod = await import(pathToFileURL(join(import.meta.dirname, "..", "index.js")).href);
-const tool = mod.tool || null;
 let pass = 0;
 const fails = [];
 const check = (name, cond, extra = "") => {
   if (cond) { pass++; console.log("  ✓ " + name); }
   else { fails.push(name + (extra ? " — " + extra : "")); console.log("  ✗ " + name + (extra ? " — " + extra : "")); }
 };
-
-/** 极简 JSON Schema 子集校验（type / required / properties / additionalProperties / items / enum） */
-function validate(schema, value, path = "$") {
-  const errors = [];
-  if (schema.enum && !schema.enum.includes(value)) errors.push(`${path}: ${JSON.stringify(value)} 不在 enum 里`);
-  const t = schema.type;
-  if (t) {
-    const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
-    const map = { integer: (v) => typeof v === "number" && Number.isInteger(v), number: (v) => typeof v === "number", object: (v) => v !== null && typeof v === "object" && !Array.isArray(v) };
-    const ok = map[t] ? map[t](value) : actual === t;
-    if (!ok) errors.push(`${path}: 期望 ${t}，实际 ${actual}`);
-  }
-  if (Array.isArray(value) && schema.items) value.forEach((v, i) => errors.push(...validate(schema.items, v, `${path}[${i}]`)));
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    for (const k of schema.required || []) if (!(k in value)) errors.push(`${path}: 缺必填 ${k}`);
-    for (const [k, v] of Object.entries(value)) {
-      const sub = schema.properties && schema.properties[k];
-      if (!sub) { if (schema.additionalProperties === false) errors.push(`${path}: 多余字段 ${k}`); continue; }
-      errors.push(...validate(sub, v, `${path}.${k}`));
-    }
-  }
-  return errors;
-}
 
 const tmp = await mkdtemp(join(tmpdir(), "dsh-gh-index-"));
 const cfg = join(tmp, "state");
@@ -66,7 +43,7 @@ console.log("— 各动作输出契约（临时配置目录）—");
 const run = async (args) => {
   const started = Date.now();
   const value = await registered.execute({ ...args, configDir: cfg });
-  const errs = validate(registered.output.schema, value);
+  const errs = validateAgainstSchema(registered.output.schema, value);
   const text = registered.output.render(args, value)[0].text;
   check(`execute(${args.action}) 合规`, errs.length === 0, errs.slice(0, 3).join(" | "));
   check(`execute(${args.action}) 有渲染文本`, typeof text === "string" && text.length > 0);

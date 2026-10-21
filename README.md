@@ -87,6 +87,8 @@
 - **删除会同步**：本地删掉的文件，下一次 push 会从远端树上移除
 - **自动补 README**：插件没有 `README.md` 时，往仓库里写一份带安装说明的 README（不落盘、不改你的目录）
 - **不动工作区**：走 GitHub REST 的 Git Data API（blobs → tree → commit → ref），不生成 `.git`，不写 `.gitignore`
+- **空库自动处理**：GitHub 对「一个提交都没有的空库」会拒绝 blobs/trees（`409 Git Repository is empty`），
+  所以建库时带一个初始提交；如果库是你手动建的且还空着，会先用 Contents API 写一份 README 再继续，无需人工干预
 
 ## 状态文件（不在插件目录里）
 
@@ -117,7 +119,7 @@
 
 ```powershell
 cd D:\桌面\ai插件\GitHubAI插件自动上传
-node assets/selftest.mjs         # 本地 mock GitHub：建库→提交→增量→删除→install→link，46 项
+node assets/selftest.mjs         # 本地 mock GitHub：建库→提交→增量→删除→空库兜底→install→link→工具层，60 项
 node assets/selftest-index.mjs   # 工具定义与输出 schema 契约，25 项
 ```
 
@@ -128,6 +130,7 @@ node assets/selftest-index.mjs   # 工具定义与输出 schema 契约，25 项
 | `401 Bad credentials` | 令牌无效/过期 | 重新生成 PAT → `action=auth` |
 | `403` | 令牌权限不足 | classic 勾 `repo`；fine-grained 给 Administration+Contents |
 | `422 name already exists` | 同名库已存在（可能属于别的账号/组织） | 改 `repoPrefix` 或 `owner` |
+| `409 Git Repository is empty` | 空库不能直接走 Git Data API | 插件已自动处理（建库带初始提交 + 空库用 Contents 初始化）；仍报错就在网页上先建个 README |
 | `目标库 … 是公开库，已拒绝上传` | 目标库不是私有的 | 改库为私有，或显式 `allowPublic=true` |
 | `没找到 pnpm` | link 时找不到 pnpm | 手动 `cd <profile>; pnpm install` |
 

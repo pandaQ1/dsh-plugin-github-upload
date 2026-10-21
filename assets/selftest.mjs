@@ -20,8 +20,9 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
-  gitBlobSha, linkPluginToProfile, pluginInfo, repoNameFor, treeIdOf, walkFiles,
+  gitBlobSha, linkPluginToProfile, pluginInfo, repoNameFor, treeIdOf, validateAgainstSchema, walkFiles,
 } from "./lib.mjs";
 import { push } from "./push.mjs";
 import { install } from "./install.mjs";
@@ -405,6 +406,27 @@ console.log("— link 进 DSH profile —");
   check("bundles 已加入", pkg.dsh.profile.bundles.includes("dsh-plugin-fixture-b"));
   check("原有 bundle 保留", pkg.dsh.profile.bundles.includes("@deepseek-ai/dsh-base"));
   check("需要重启提示", lr.needsRestart === true);
+}
+
+console.log("— 工具层全链路（index.js → assets 脚本 → mock GitHub） —");
+{
+  const mod = await import(pathToFileURL(join(import.meta.dirname, "..", "index.js")).href);
+  let tool;
+  mod.apply({ effect: (f) => f(), tools: { register: (t) => { tool = t; return () => {}; } } });
+  const schema = tool.output.schema;
+  const runTool = async (args) => {
+    const v = await tool.execute({ ...args, configDir: cfgDir });
+    const errs = validateAgainstSchema(schema, v);
+    check(`tool ${args.action} 输出合规`, errs.length === 0, errs.slice(0, 3).join(" | "));
+    check(`tool ${args.action} 有渲染文本`, tool.output.render(args, v)[0].text.length > 0);
+    return v;
+  };
+  const st = await runTool({ action: "status" });
+  check("status 列出全部插件", (st.plugins || []).length === 5, String((st.plugins || []).length));
+  const ls = await runTool({ action: "list" });
+  check("list 读到登记表", (ls.plugins || []).length === 3, String((ls.plugins || []).length));
+  const dr = await runTool({ action: "push", dirs: [fx.a], dryRun: true, token: "test-token" });
+  check("push 演练通过且报告无改动", dr.ok === true, dr.summary);
 }
 
 await mock.stop();
