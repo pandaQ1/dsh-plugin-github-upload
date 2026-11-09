@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "dsh-plugin-github-upload",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "type": "module",
   "title": "GitHub 门房",

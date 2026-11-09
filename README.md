@@ -16,8 +16,15 @@
 dsh plugin --profile desktop add https://api.github.com/repos/pandaQ1/dsh-plugin-github-upload/tarball/main
 
 # 方式二：拷目录后挂载
-dsh plugin --profile desktop add "D:\桌面\ai插件\GitHubAI插件自动上传"
+dsh plugin --profile desktop add "<插件目录绝对路径>"
 ```
+
+> ⚠️ 一定要用上面的 **API tarball 地址**（`api.github.com/.../tarball/main`）。
+> 写成 `https://github.com/pandaQ1/dsh-plugin-github-upload` 会被 pnpm 当成 **git 依赖**去 `git ls-remote`，
+> 本机没装 git 时直接失败——而这台机器恰恰常常没有 git。
+>
+> 本仓库所有文本文件都是**无 BOM 的 UTF-8**：带 BOM 的 `package.json` 会让 DSH 的严格 `JSON.parse` 报
+> `Unexpected token '\uFEFF'` 并回滚安装。`push` 动作会在上传前自动剥掉 BOM，防止这个问题被推上去。
 
 装完**重启 DSH**，设置页会出现「GitHub 登录」。
 

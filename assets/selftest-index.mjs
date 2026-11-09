@@ -1,4 +1,4 @@
-﻿// selftest-index.mjs — 校验 index.js 里的工具定义与输出契约（不联网、不写真实配置）
+// selftest-index.mjs — 校验 index.js 里的工具定义与输出契约（不联网、不写真实配置）
 //
 //   node assets/selftest-index.mjs
 //

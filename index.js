@@ -264,8 +264,63 @@ async function doScan(cfgDirArg, args) {
   };
 }
 
+/** 上传前会检查的文本文件类型（DSH 只对 json 严格，但顺手把同类都规范化）。 */
+const BOM_TARGETS = /\.(json|jsonc|ya?ml|md|js|mjs|cjs|ts|css|html)$/iu;
+
+/**
+ * 去掉目录里文本文件的 UTF-8 BOM。
+ *
+ * 为什么必须做：DSH 校验插件清单用的是严格 `JSON.parse()`，带 BOM 的
+ * package.json 会报 `Unexpected token '\uFEFF'` 并回滚安装。这个坑正好卡在
+ * 「新机器匿名装第一块砖」的场景上，所以把修正在上传前自动做掉，而不是靠人记得。
+ */
+async function stripBomInDir(dir, { dryRun = false } = {}) {
+  const { readFile, readdir, writeFile } = await import("node:fs/promises");
+  const fixed = [];
+  const walk = async (current) => {
+    let entries = [];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!BOM_TARGETS.test(entry.name)) continue;
+      let buffer;
+      try {
+        buffer = await readFile(full);
+      } catch {
+        continue;
+      }
+      if (buffer.length < 3 || buffer[0] !== 0xEF || buffer[1] !== 0xBB || buffer[2] !== 0xBF) continue;
+      fixed.push(full.slice(dir.length + 1).replace(/\\/gu, "/"));
+      if (!dryRun) await writeFile(full, buffer.subarray(3));
+    }
+  };
+  await walk(dir);
+  return fixed;
+}
+
 async function doPush(cfgDirArg, args) {
   const list = ["--json"];
+  // 上传前先把 BOM 剥掉：带 BOM 的 package.json 会让下游的严格 JSON.parse 直接拒装
+  const targets = [];
+  if (args.dir) targets.push(resolve(String(args.dir)));
+  if (Array.isArray(args.dirs)) targets.push(...args.dirs.map((value) => resolve(String(value))));
+  let bomFixed = [];
+  for (const dir of targets) {
+    try {
+      bomFixed.push(...(await stripBomInDir(dir, { dryRun: args.dryRun === true })));
+    } catch {
+      /* 剥不掉就让 push 自己报错 */
+    }
+  }
   if (cfgDirArg) list.push("--config", cfgDirArg);
   if (args.dir) list.push("--dir", resolve(String(args.dir)));
   if (args.dirs && args.dirs.length) list.push("--dirs", args.dirs.join(";"));
@@ -306,6 +361,7 @@ async function doPush(cfgDirArg, args) {
     uploaded: p.uploaded || 0, deleted: p.deleted || 0, sha: p.sha || "", dir: p.dir || "", error: p.error || "",
   }));
   const issues = [
+    ...(bomFixed.length ? [{ level: "warn", msg: `已自动剥掉 UTF-8 BOM（否则下游严格 JSON.parse 会拒装）：${bomFixed.join("、")}` }] : []),
     ...(data?.errors || []).map((e) => ({ level: "error", msg: `${e.msg}${e.hint ? "（" + e.hint + "）" : ""}` })),
     ...(data?.plugins || []).filter((p) => p.skipped && p.skipped.length).flatMap((p) => p.skipped.slice(0, 3).map((s) => ({ level: "info", msg: `${p.title}：跳过 ${s}` }))),
   ];
