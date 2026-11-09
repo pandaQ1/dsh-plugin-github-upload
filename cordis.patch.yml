@@ -1,5 +1,12 @@
-# github_upload tool row (GitHub 私有库自动上传：一个插件一个库)
+# GitHub 门房（github_upload）：一个插件一个私有库 + 设备码登录
+#
+# oauthClientId：GitHub OAuth App 的 Client ID（公开信息，不是 secret）。
+#   在 GitHub → Settings → Developer settings → OAuth Apps 新建一个，
+#   勾上 Enable Device Flow，把 Client ID 填到这里（或用 action=init clientId=…）。
+#   留空也能用：登录改走设置页的「直接粘 PAT」。
 - insert:
     - id: github-upload
       name: 'dsh-plugin-github-upload'
-      config: {}
+      config:
+        oauthClientId: ''
+        oauthScope: repo

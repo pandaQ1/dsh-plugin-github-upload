@@ -6,7 +6,9 @@
 // 动作：
 //   status   自检：令牌、账号、插件目录、已上传数量、待同步数量
 //   init     初始化配置（自动探测插件根目录 / profile / pnpm）
-//   auth     校验并保存 GitHub 令牌（PAT，需 repo 权限）
+//   login    设备码登录 GitHub（OAuth App device flow，不需要 client secret）
+//   login-status / login-cancel / logout  登录态、取消、退出
+//   auth     校验并保存 GitHub 令牌（PAT，需 repo 权限；设备码不可用时的兜底）
 //   scan     扫描插件，算出建议仓库名与文件清单（只读、不联网）
 //   push     上传：单插件 / 多个 / all=true 全量增量同步（无改动自动跳过）
 //   install  从私有库装回插件（可 link 进 DSH profile）
@@ -22,12 +24,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   candidateRoots, configDirOf, effectiveRoots, findProfileDir, findPnpm, kb, linkPluginToProfile, loadConfig,
-  loadRegistry, makeApi, maskToken, pluginInfo, repoNameFor, resolveToken, saveConfig, saveToken, scanRoots,
+  loadRegistry, makeApi, maskToken, pluginInfo, repoNameFor, resolveToken, runCommand, saveConfig, saveToken, scanRoots,
   treeIdOf, walkFiles, whoAmI,
 } from "./assets/lib.mjs";
+import { cancelLogin, disposeLogin, loginStatus, logout, startLogin } from "./gate.js";
 
 export const name = "github-plugin-upload";
-export const inject = ["tools"];
+export const inject = ["tools", "webServer"];
+
+/** 设置页用到的 HTTP 路由前缀（登录卡片的宿主半边）。 */
+const ROUTE = "/dsh-github-gate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ASSETS = join(HERE, "assets");
@@ -185,6 +191,8 @@ async function doInit(cfgDirArg, args) {
     if (pnpm) next.pnpmBin = pnpm.path;
   }
   if (args.owner) next.owner = args.owner;
+  if (args.clientId) next.oauthClientId = String(args.clientId).trim();
+  if (args.scope) next.oauthScope = String(args.scope).trim();
   if (args.repoPrefix !== undefined) next.repoPrefix = args.repoPrefix;
   const file = await saveConfig(cfgDir, next);
   return {
@@ -196,7 +204,10 @@ async function doInit(cfgDirArg, args) {
       { name: "安装目录", ok: true, detail: next.installRoot || "(空)" },
       { name: "profile", ok: !!next.profileDir, detail: next.profileDir || "未找到（link 时可用 profileDir 指定）" },
       { name: "pnpm", ok: !!next.pnpmBin, detail: next.pnpmBin || "未找到（link 时可手动 pnpm install）" },
-      { name: "令牌", ok: false, detail: "下一步：action=auth token=<PAT>（只需一次）" },
+      next.oauthClientId
+        ? { name: "OAuth App", ok: true, detail: `client_id 已配置 · scope ${next.oauthScope || "repo"} · 可用 action=login 登录` }
+        : { name: "OAuth App", ok: false, detail: "未配置 clientId（可选）：不配也能用，登录改走 action=auth token=<PAT>" },
+      { name: "令牌", ok: false, detail: "下一步：action=login（设备码登录）或 action=auth token=<PAT>" },
     ],
     summary: `配置已写入 ${file}`,
   };
@@ -377,6 +388,95 @@ async function doList(cfgDirArg, args) {
   };
 }
 
+/* ───────────────── download（不吃 git 的拉取） ───────────────── */
+
+/**
+ * 用 GitHub tarball 把仓库拉成本地目录，再可选 link 进 profile。
+ *
+ * 存在的理由：install.mjs 走的是 `git clone`，而「新机器第一次恢复」的机器
+ * 往往没装 git。tarball 只要一个令牌就能下，Windows 自带 bsdtar 就能解。
+ */
+async function downloadOne({ api, owner, repo, dir, link, profileDir, cfg }) {
+  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/tarball/HEAD`, {
+    headers: { authorization: `Bearer ${api.token}`, accept: "application/vnd.github+json", "user-agent": "dsh-github-upload/1.1" },
+  });
+  if (!response.ok) return { ok: false, dir, error: `下载失败 HTTP ${response.status}` };
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const { tmpdir } = await import("node:os");
+  const { writeFile, mkdir, rm } = await import("node:fs/promises");
+  const tmp = join(tmpdir(), `github-gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tar.gz`);
+  await writeFile(tmp, buffer);
+  await mkdir(dir, { recursive: true });
+  const tar = await runCommand("tar", ["-xzf", tmp, "-C", dir, "--strip-components=1"], { timeoutMs: 180000 });
+  await rm(tmp, { force: true }).catch(() => undefined);
+  if (!tar.ok) return { ok: false, dir, error: `解压失败：${(tar.text || "").slice(-300)}` };
+  if (link !== true) return { ok: true, dir, bytes: buffer.length, linked: false };
+  const linked = await linkPluginToProfile(cfg, dir, { profileDir: profileDir || cfg.profileDir || "", pnpmBin: cfg.pnpmBin });
+  return { ok: linked.ok === true, dir, bytes: buffer.length, linked: linked.ok === true, linkError: linked.ok ? "" : (linked.error || linked.note || "") };
+}
+
+async function doDownload(cfgDirArg, args) {
+  const { cfgDir, cfg } = await loadConfig(cfgDirArg);
+  const reg = await loadRegistry(cfgDir);
+  const t = await resolveToken(cfgDir, cfg, args.token);
+  if (!t.token) return { ok: false, summary: "没有令牌：先 action=login（设备码）或 action=auth token=<PAT>", checks: [] };
+  const api = makeApi({ token: t.token, apiBase: cfg.apiBase, timeoutMs: 60000 });
+  api.token = t.token;
+
+  // 目标清单：repo=owner/name | name=包名/插件名 | all=true（登记表全量）
+  const targets = [];
+  if (args.repo) {
+    const m = /^([^/\s]+)\/([^/\s]+)$/u.exec(String(args.repo).trim());
+    if (m === null) return { ok: false, summary: `repo 要是 owner/name 形式：${args.repo}`, checks: [] };
+    targets.push({ owner: m[1], repo: m[2], folder: m[2], title: "", plugin: "" });
+  } else if (args.name) {
+    const needle = String(args.name).trim().toLowerCase();
+    const hit = Object.entries(reg.repos).find(([repo, rec]) =>
+      repo.toLowerCase() === needle || String(rec?.plugin ?? "").toLowerCase() === needle || String(rec?.folder ?? "").toLowerCase() === needle);
+    if (hit === undefined) return { ok: false, summary: `登记表里没有 ${args.name}：先 action=list 看有哪些`, checks: [] };
+    const [repo, rec] = hit;
+    targets.push({ owner: rec.owner, repo, folder: rec.folder || repo, title: rec.title || "", plugin: rec.plugin || "" });
+  } else if (args.all) {
+    for (const [repo, rec] of Object.entries(reg.repos)) {
+      targets.push({ owner: rec.owner, repo, folder: rec.folder || repo, title: rec.title || "", plugin: rec.plugin || "" });
+    }
+  } else {
+    return { ok: false, summary: "download 需要 repo=owner/name、name=<包名> 或 all=true", checks: [] };
+  }
+  if (targets.length === 0) return { ok: false, summary: "目标为空：登记表是空的，先 action=scan 再 action=push", checks: [] };
+
+  const roots = await effectiveRoots(cfg);
+  const installRoot = args.into ? resolve(String(args.into)) : (cfg.installRoot || roots.roots[0] || configDirOf(cfgDir));
+  const rows = [];
+  for (const target of targets) {
+    if (args.dryRun === true) {
+      rows.push({ name: target.plugin || target.repo, title: target.title || target.repo, version: "", repo: `${target.owner}/${target.repo}`, repoUrl: `https://github.com/${target.owner}/${target.repo}`, dir: join(installRoot, target.folder), status: "new", changed: false, error: "" });
+      continue;
+    }
+    const dir = join(installRoot, target.folder);
+    const result = await downloadOne({ api, owner: target.owner, repo: target.repo, dir, link: args.link, profileDir: args.profileDir ? resolve(String(args.profileDir)) : "", cfg });
+    rows.push({
+      name: target.plugin || target.repo, title: target.title || target.repo, version: "", repo: `${target.owner}/${target.repo}`,
+      repoUrl: `https://github.com/${target.owner}/${target.repo}`, dir: result.dir,
+      status: result.ok ? (result.linked ? "installed" : "uploaded") : "failed",
+      files: 0, bytes: result.bytes || 0, changed: true, error: result.error || result.linkError || "",
+    });
+  }
+  const failed = rows.filter((row) => row.status === "failed");
+  return {
+    ok: failed.length === 0,
+    plugins: rows,
+    checks: [
+      { name: "安装目录", ok: true, detail: installRoot },
+      { name: "下载方式", ok: true, detail: "GitHub tarball（不需要 git）" + (args.link ? " · 已 link 进 profile" : "") },
+    ],
+    issues: failed.length === 0 ? [{ level: "info", msg: "重启 DSH 后新插件生效" }] : failed.map((row) => ({ level: "error", msg: `${row.name}：${row.error}` })),
+    summary: args.dryRun === true
+      ? `演练：将下载 ${rows.length} 个仓库到 ${installRoot}`
+      : `${rows.length - failed.length}/${rows.length} 个仓库已下载${args.link ? " 并 link" : ""}${failed.length ? `，失败 ${failed.length}` : ""}`,
+  };
+}
+
 /* ───────────────── 工具定义 ───────────────── */
 
 const parameters = {
@@ -386,9 +486,12 @@ const parameters = {
   properties: {
     action: {
       type: "string",
-      enum: ["status", "init", "auth", "scan", "push", "install", "link", "list"],
-      description: "status=自检；init=写配置；auth=校验并保存令牌；scan=扫描插件；push=上传到私有库；install=从私有库装回；link=挂进 DSH profile；list=已上传清单",
+      enum: ["status", "init", "login", "login-status", "login-cancel", "logout", "auth", "scan", "push", "download", "install", "link", "list"],
+      description: "status=自检；init=写配置（含 clientId）；login=设备码登录 GitHub；login-status=登录进度；login-cancel=取消登录；logout=退出并删本地令牌；auth=校验并保存 PAT；scan=扫描插件；push=上传到私有库；download=用 tarball 拉取（不需要 git，可 link）；install=用 git clone 装回；link=挂进 DSH profile；list=已上传清单",
     },
+    clientId: { type: "string", description: "login：OAuth App 的 Client ID（device flow 用；也可在 init 时写进配置）" },
+    scope: { type: "string", description: "login：申请的权限范围，默认 repo" },
+    openBrowser: { type: "boolean", description: "login：是否自动打开授权页，默认 true" },
     dir: { type: "string", description: "插件目录（push/scan/link 用）；默认当前目录" },
     dirs: { type: "array", items: { type: "string" }, description: "push/scan 多个插件目录" },
     all: { type: "boolean", description: "push=同步全部插件；install=把登记表里本地还没有的都装上" },
@@ -416,11 +519,14 @@ const parameters = {
 const tool = {
   name: "github_upload",
   description:
-    "「GitHub插件自动上传」：把 DSH 插件（现有或新做好的）自动同步到 GitHub 私有库，一个插件一个私有库，方便换机器/重装后一键装回。"
-    + "status=自检（令牌/账号/插件目录/待同步）；init=初始化配置；auth=校验并保存 PAT；scan=扫描插件并算建议仓库名与文件清单（只读不联网）；"
+    "「GitHub 门房 / 插件自动上传」：新机器上先用设备码登录 GitHub（或粘 PAT），再把这个插件库当通道，把 DSH 插件同步到 GitHub 私有库、或从私有库装回来。"
+    + "login=设备码登录（OAuth App device flow，自动开浏览器，后台轮询）；login-status=看登录进度；login-cancel=取消；logout=退出登录；"
+    + "status=自检（令牌/账号/插件目录/待同步）；init=初始化配置（可顺便写 clientId）；auth=校验并保存 PAT（不想建 OAuth App 时用它）；"
+    + "scan=扫描插件并算建议仓库名与文件清单（只读不联网）；"
     + "push=上传（dir 单个 / dirs 多个 / all=true 全量增量，未改动自动跳过，首次自动建私有库，删除的文件自动从远端移除）；"
-    + "install=从私有库克隆装回（可 link=true 自动挂进 DSH profile）；link=把已有目录挂进 profile；list=查看已上传清单。"
-    + "走 GitHub REST Git Data API，不写 .git、不动工作区、只传变动的 blob。做新插件后想备份/分发、或要恢复插件时用。",
+    + "download=用 GitHub tarball 把仓库拉成本地目录（不需要 git，可 link=true 直接挂进 profile，新机器第一次恢复就用它）；"
+    + "install=从私有库 git clone 装回（机器上得有 git）；link=把已有目录挂进 profile；list=查看已上传清单。"
+    + "走 GitHub REST Git Data API，不写 .git、不动工作区、只传变动的 blob。换机器恢复插件、备份插件、给插件建分发通道时用。",
   parameters,
   output: {
     schema: {
@@ -431,6 +537,14 @@ const tool = {
         ok: { type: "boolean" },
         action: { type: "string" },
         summary: { type: "string" },
+        detail: { type: "string" },
+        userCode: { type: "string" },
+        verificationUri: { type: "string" },
+        expiresAt: { type: "integer" },
+        opened: { type: "boolean" },
+        login: { type: "string" },
+        flow: { type: "object", additionalProperties: true },
+        token: { type: "object", additionalProperties: true },
         cfgDir: { type: "string" },
         steps: {
           type: "array",
@@ -514,9 +628,14 @@ const tool = {
     const action = String(args.action);
     let res;
     if (action === "init") res = await doInit(cfgDir, args);
+    else if (action === "login") res = await startLogin({ cfgDir: cfgDir || undefined, clientId: args.clientId, scope: args.scope, openBrowser: args.openBrowser !== false });
+    else if (action === "login-status") res = await loginStatus({ cfgDir: cfgDir || undefined });
+    else if (action === "login-cancel") res = cancelLogin({ cfgDir: cfgDir || undefined });
+    else if (action === "logout") res = await logout({ cfgDir: cfgDir || undefined });
     else if (action === "auth") res = await doAuth(cfgDir, args);
     else if (action === "scan") res = await doScan(cfgDir, args);
     else if (action === "push") res = await doPush(cfgDir, args);
+    else if (action === "download") res = await doDownload(cfgDir, args);
     else if (action === "install") res = await doInstall(cfgDir, args);
     else if (action === "link") res = await doLink(cfgDir, args);
     else if (action === "list") res = await doList(cfgDir, args);
@@ -527,6 +646,14 @@ const tool = {
       action,
       summary: res.summary || "",
       cfgDir: res.cfgDir || configDirOf(cfgDir),
+      ...(res.detail ? { detail: res.detail } : {}),
+      ...(res.userCode ? { userCode: res.userCode } : {}),
+      ...(res.verificationUri ? { verificationUri: res.verificationUri } : {}),
+      ...(typeof res.expiresAt === "number" ? { expiresAt: res.expiresAt } : {}),
+      ...(typeof res.opened === "boolean" ? { opened: res.opened } : {}),
+      ...(typeof res.login === "string" && res.login !== "" ? { login: res.login } : {}),
+      ...(res.flow ? { flow: res.flow } : {}),
+      ...(res.token ? { token: res.token } : {}),
       ...(res.steps ? { steps: res.steps } : {}),
       ...(res.checks ? { checks: res.checks } : {}),
       ...(res.plugins ? { plugins: res.plugins } : {}),
@@ -539,6 +666,143 @@ const tool = {
   },
 };
 
+/* ───────────────── 设置页的宿主半边（登录卡） ───────────────── */
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+function sendJson(response, status, payload) {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+  response.writeHead(status, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(payload ?? {}));
+}
+
+async function readJsonBody(request, maxBytes = 256 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) throw new HttpError(413, "请求体过大");
+    chunks.push(buffer);
+  }
+  if (size === 0) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new HttpError(400, "请求体不是合法 JSON");
+  }
+}
+
+function refuseUnadmitted(ctx, request, response) {
+  const connection = ctx.get("connection");
+  const gate = connection?.requestRejection;
+  if (typeof gate !== "function") {
+    const raw = request.headers.host;
+    if (raw === undefined) return false;
+    const host = raw.toLowerCase();
+    if (/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\]|::1)(:\d+)?$/u.test(host)) return false;
+    sendJson(response, 403, { error: "宿主没有 connection 服务，只允许本机访问" });
+    return true;
+  }
+  let status;
+  try {
+    status = gate.call(connection, request);
+  } catch {
+    status = 403;
+  }
+  if (status === undefined) return false;
+  sendJson(response, status, { error: status === 401 ? "需要先在 DSH 里登录" : "来源地址不受信任，已拒绝" });
+  return true;
+}
+
+function sameOrigin(request) {
+  if (request.headers["sec-fetch-site"] === "cross-site") return false;
+  const host = request.headers.host;
+  const origin = request.headers.origin;
+  if (origin === undefined || host === undefined) return true;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+function guarded(ctx, handler, options = {}) {
+  return async (request, response) => {
+    if (refuseUnadmitted(ctx, request, response)) return;
+    if (options.mutating === true && !sameOrigin(request)) {
+      sendJson(response, 403, { error: "跨站请求已拒绝" });
+      return;
+    }
+    try {
+      await handler(request, response);
+    } catch (error) {
+      sendJson(response, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+}
+
 export function apply(ctx) {
   ctx.effect(() => ctx.tools.register(tool));
+  // 插件卸载 / 重载时，别把后台轮询留在进程里
+  ctx.effect(() => () => disposeLogin());
+
+  ctx.effect(() => {
+    const webServer = ctx.get("webServer");
+    if (webServer === undefined || typeof webServer.register !== "function") {
+      ctx.logger?.warn?.("github-plugin-upload: webServer 不可用，设置页登录卡不会出现（工具侧 action=login 仍然可用）");
+      return () => {};
+    }
+    const disposers = [];
+    const add = (path, handler) => disposers.push(webServer.register({ kind: "exact", path, handler }));
+
+    add(`${ROUTE}/status`, guarded(ctx, async (_request, response) => {
+      sendJson(response, 200, await loginStatus({ cfgDir: undefined }));
+    }));
+
+    add(`${ROUTE}/login`, guarded(ctx, async (request, response) => {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, await startLogin({
+        cfgDir: undefined,
+        clientId: typeof body.clientId === "string" ? body.clientId : undefined,
+        scope: typeof body.scope === "string" ? body.scope : undefined,
+        openBrowser: body.openBrowser !== false,
+      }));
+    }, { mutating: true }));
+
+    add(`${ROUTE}/login-cancel`, guarded(ctx, async (_request, response) => {
+      sendJson(response, 200, cancelLogin({}));
+    }, { mutating: true }));
+
+    add(`${ROUTE}/token`, guarded(ctx, async (request, response) => {
+      const body = await readJsonBody(request);
+      const result = await doAuth("", { token: typeof body.token === "string" ? body.token : "", saveToken: body.saveToken !== false });
+      if (!result.ok) throw new HttpError(400, result.summary || "令牌不可用");
+      sendJson(response, 200, { ...result, ...(await loginStatus({ cfgDir: undefined })) });
+    }, { mutating: true }));
+
+    add(`${ROUTE}/logout`, guarded(ctx, async (_request, response) => {
+      sendJson(response, 200, await logout({ cfgDir: undefined }));
+    }, { mutating: true }));
+
+    ctx.logger?.info?.(`github-plugin-upload: 登录卡路由已挂载 ${ROUTE}/*`);
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose?.();
+        } catch {
+          /* 已卸载 */
+        }
+      }
+    };
+  });
 }

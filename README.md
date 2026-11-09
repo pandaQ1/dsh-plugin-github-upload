@@ -1,149 +1,80 @@
-# GitHub插件自动上传（dsh-plugin-github-upload）
+# GitHub 门房（DSH 插件）
 
-把 DSH 插件（**现有的**、**新做好的**）自动同步到 GitHub **私有库**，**一个插件一个库**。
-以后换机器、重装 DSH，一条 `install` 就能把插件装回来并挂进 DSH。
+给 [DeepSeek Harness](https://github.com/deepseek-ai) 用的 GitHub 通道插件：**先登录，再搬运**。
 
-工具名：`github_upload` · 动作：`status / init / auth / scan / push / install / link / list`
+- **登录**：设置页一键**设备码登录**（OAuth App Device Flow，不需要 client secret）；也可以直接粘 Personal Access Token。
+- **上传**：把本机的 DSH 插件同步到 GitHub 私有库，一个插件一个库，增量、自动建库、未改动自动跳过。
+- **拉取/安装**：用 GitHub tarball 把仓库拉回本地（**不需要 git**），并挂进 DSH profile；或用 `git clone` 路线装回。
 
----
+它本身放在一个**公开仓库**里，因为这个插件的意义就是「新机器上第一块砖」：
+换机器时，你不必先手动拷 token、也不必先装 git —— 匿名装它，登录一次，之后所有私有库就都可达了。
 
-## 它解决了什么
-
-| 以前 | 现在 |
-| --- | --- |
-| 插件散落在 `D:\桌面\ai插件`，没有版本、没有备份 | 每个插件一个私有仓库，提交历史可回溯 |
-| 手动 `git init / add / commit / remote / push`，还得记得排除 `node_modules` | `push all=true` 一条命令增量同步，没改动自动跳过 |
-| 换机器要一个个拷目录 | `install all=true` 全部装回，`link` 自动接进 DSH profile |
-| 私有库要逐个建、逐个确认 | 首次 push 自动建**私有**库（发现是公开库会直接拒绝） |
-
----
-
-## 一次性准备：GitHub 令牌（PAT）
-
-只需要一次。
-
-1. 打开 <https://github.com/settings/tokens> → **Generate new token (classic)**
-2. 勾选 **`repo`**（整块，含私有库读写与建库）；如果你还要推 workflow 文件再勾 `workflow`
-3. 生成后复制 `ghp_...`，在 DSH 里执行：
-
-```json
-{"action":"auth","token":"ghp_你的令牌"}
-```
-
-> 令牌会保存到 `%USERPROFILE%\.dsh\github-plugin-upload\token.txt`（仅本机）。
-> 也可以完全不保存：设环境变量 `GITHUB_TOKEN`，插件优先读环境变量。
-> fine-grained token 需要 **Administration: Read/Write**（建库）+ **Contents: Read/Write**（推文件），
-> 且 Repository access 选 **All repositories**，否则新库建不出来。
-
----
-
-## 常用动作
-
-| 动作 | 干什么 | 典型调用 |
-| --- | --- | --- |
-| `status` | 自检：令牌、账号、插件根目录、已上传数、待同步数 | `{"action":"status"}` |
-| `init` | 写配置（自动探测插件根目录 / profile / pnpm） | `{"action":"init"}` |
-| `auth` | 校验并保存 PAT | `{"action":"auth","token":"ghp_..."}` |
-| `scan` | 扫描插件，算建议仓库名与文件清单（只读、不联网） | `{"action":"scan"}` |
-| `push` | 上传：单个 / 多个 / 全部增量 | `{"action":"push","all":true}` |
-| `install` | 从私有库装回 | `{"action":"install","repo":"我/dsh-plugin-x"}` |
-| `link` | 把已有目录挂进 DSH profile | `{"action":"link","dir":"D:\\桌面\\ai插件\\某插件"}` |
-| `list` | 看已上传清单 | `{"action":"list","refresh":true}` |
-
-### 第一次：把现有插件全部传上去
-
-```json
-{"action":"init"}
-{"action":"scan"}
-{"action":"push","all":true}
-```
-
-`push` 会为每个插件建一个私有库，仓库名默认取插件 `package.json` 的 `name`
-（如 `dsh-plugin-edge-standard`；GitHub 不允许中文仓库名，中文标题只写进仓库描述和 README）。
-
-### 做完新插件：一条命令
-
-```json
-{"action":"push","dir":"D:\\桌面\\ai插件\\新插件目录"}
-```
-
-或者继续 `{"action":"push","all":true}` —— 只传有改动的插件。
-
-### 换机器 / 重装后：装回来
-
-```json
-{"action":"install","all":true,"link":true}
-```
-
-会把登记表里的插件克隆到安装目录，并写进 DSH profile（重启 DSH 生效）。
-
----
-
-## 上传规则
-
-- **只传插件本身**：`package.json` + `cordis.patch.yml` + `index.js` + `locale/` + `assets/` 等
-- **默认排除**：`node_modules`、`.git`、`dist/build`、`.cache`、`__pycache__`、`.venv`、`.test-proj`、系统垃圾文件
-- **单文件上限** 20MB（可用 `maxFileMB` 调），超限会在结果里列出来
-- **删除会同步**：本地删掉的文件，下一次 push 会从远端树上移除
-- **自动补 README**：插件没有 `README.md` 时，往仓库里写一份带安装说明的 README（不落盘、不改你的目录）
-- **不动工作区**：走 GitHub REST 的 Git Data API（blobs → tree → commit → ref），不生成 `.git`，不写 `.gitignore`
-- **空库自动处理**：GitHub 对「一个提交都没有的空库」会拒绝 blobs/trees（`409 Git Repository is empty`），
-  所以建库时带一个初始提交；如果库是你手动建的且还空着，会先用 Contents API 写一份 README 再继续，无需人工干预
-
-## 状态文件（不在插件目录里）
-
-```
-%USERPROFILE%\.dsh\github-plugin-upload\
-├─ config.json      # owner / 插件根目录 / 排除项 / 前缀 …
-├─ registry.json    # 每个插件 → 仓库、分支、commit sha、文件数、上次推送时间
-└─ token.txt        # PAT（可删，改用环境变量）
-```
-
-`config.json` 常用字段：
-
-```json
-{
-  "owner": "auto",
-  "repoPrefix": "",
-  "pluginRoots": ["D:\\桌面\\ai插件"],
-  "installRoot": "D:\\桌面\\ai插件",
-  "exclude": ["*.psd"],
-  "maxFileMB": 20,
-  "profileDir": "C:\\Users\\<你>\\.dsh\\profiles\\desktop"
-}
-```
-
----
-
-## 自测（无需令牌、无需外网）
+## 安装
 
 ```powershell
-cd D:\桌面\ai插件\GitHubAI插件自动上传
-node assets/selftest.mjs         # 本地 mock GitHub：建库→提交→增量→删除→空库兜底→install→link→工具层，60 项
-node assets/selftest-index.mjs   # 工具定义与输出 schema 契约，25 项
+# 方式一：直接装（公开库，匿名可拉）
+dsh plugin --profile desktop add https://api.github.com/repos/pandaQ1/dsh-plugin-github-upload/tarball/main
+
+# 方式二：拷目录后挂载
+dsh plugin --profile desktop add "D:\桌面\ai插件\GitHubAI插件自动上传"
 ```
 
-## 退出码与报错
+装完**重启 DSH**，设置页会出现「GitHub 登录」。
 
-| 报错 | 含义 | 处理 |
-| --- | --- | --- |
-| `401 Bad credentials` | 令牌无效/过期 | 重新生成 PAT → `action=auth` |
-| `403` | 令牌权限不足 | classic 勾 `repo`；fine-grained 给 Administration+Contents |
-| `422 name already exists` | 同名库已存在（可能属于别的账号/组织） | 改 `repoPrefix` 或 `owner` |
-| `409 Git Repository is empty` | 空库不能直接走 Git Data API | 插件已自动处理（建库带初始提交 + 空库用 Contents 初始化）；仍报错就在网页上先建个 README |
-| `目标库 … 是公开库，已拒绝上传` | 目标库不是私有的 | 改库为私有，或显式 `allowPublic=true` |
-| `没找到 pnpm` | link 时找不到 pnpm | 手动 `cd <profile>; pnpm install` |
+## 登录
 
-## 安装到 DSH
+### 设备码登录（推荐）
 
-本插件本身就是 DSH 插件：目录 link 进 profile 即可（`apply(ctx)` 注册 `github_upload` 工具）。
-profile 的 `package.json` 需要两处：
+1. 在 GitHub → Settings → Developer settings → **OAuth Apps** → New OAuth App 建一个
+   （Homepage URL 随便填，如 `http://127.0.0.1`），建好后进该 App 设置，勾上 **Enable Device Flow**。
+2. 把它的 **Client ID** 填进本插件：设置页输入框，或
+   `github_upload { action: "init", clientId: "<Client ID>" }`
+3. 点「设备码登录」→ 浏览器自动打开 `github.com/login/device` → 输入屏幕上的设备码 → 授权。
+4. 宿主后台每 5 秒轮询一次，成功后令牌落到本机 `<配置目录>/token.txt`。
 
-```json
-{
-  "dependencies": { "dsh-plugin-github-upload": "link:D:/桌面/ai插件/GitHubAI插件自动上传" },
-  "dsh": { "profile": { "bundles": ["...", "dsh-plugin-github-upload"] } }
-}
+> Client ID 是公开信息，写在公开仓库/配置里都安全。整个流程**不会**用到 client secret。
+
+### 粘 PAT（不想建 OAuth App 时）
+
+设置页粘一个 token 即可（classic 勾 `repo`；fine-grained 给目标库 `Contents: Read/Write`）。
+
+## 命令速查
+
+| 动作 | 作用 |
+| --- | --- |
+| `status` | 自检：令牌 / 账号 / 插件根目录 / 待同步数 |
+| `init` | 写配置（可顺手带上 `clientId`） |
+| `login` / `login-status` / `login-cancel` / `logout` | 设备码登录、进度、取消、退出 |
+| `auth` | 校验并保存一个 PAT |
+| `scan` | 扫描插件，算建议仓库名与文件清单（只读、不联网） |
+| `push` | 上传：`dir` / `dirs` / `all=true`，无改动自动跳过 |
+| `download` | 用 tarball 拉取（**不吃 git**），`link=true` 直接挂进 profile |
+| `install` | 用 `git clone` 装回（本机需要 git） |
+| `link` | 把已有目录挂进 DSH profile |
+| `list` | 已上传清单 |
+
+## 权限与隐私
+
+- 令牌只存在本机（`~/.dsh/github-plugin-upload/token.txt`，或 `GITHUB_TOKEN` 等环境变量），**从不写进仓库、不进 `.git/config`、不进命令行参数**（`git clone` 走一次性 `GIT_ASKPASS`）。
+- 设备码登录默认只申请 `repo` 这一个 scope；不申请 `workflow`、不申请组织管理。
+- 本仓库是通用工具代码，**不含任何账号信息、私有库清单或密钥**；你的库名不会被写进这里。
+- 上传时不传 `.git`、不传 `node_modules`、单文件超限自动跳过。
+
+## 配合「Harness 管家」完成整机恢复
+
+```
+新机器
+ 1. 匿名装本插件（上面那条命令）
+ 2. 设备码登录一次
+ 3. github_upload { action: "download", all: true, link: true }   # 不吃 git 把插件全拉回来
+ 4. 装「Harness 管家」→ butler_record { action: "restore" }        # 按账本恢复设置与规则
+ 5. 重启 DSH
 ```
 
-然后 `pnpm install`，重启 DSH。
+## 已知限制
+
+- `install` 依赖 `git`；没有 git 的机器请用 `download`。
+- 设备码登录需要你自己建一个 OAuth App（GitHub 没有「免注册登录」的公开通道）；不建就用 PAT。
+- tarball 下载走 GitHub API，私有库需要有效令牌；公开库匿名即可。
+
+MIT License.
