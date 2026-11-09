@@ -9,7 +9,7 @@
  * 真正的令牌只在宿主侧落盘（<cfgDir>/token.txt），浏览器这一半从来看不到它。
  */
 window.__ModuleLoader__.load({
-  id: "dsh-plugin-github-gate",
+  id: "dsh-plugin-github-upload",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
