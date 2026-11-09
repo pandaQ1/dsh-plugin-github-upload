@@ -277,6 +277,26 @@ async function doPush(cfgDirArg, args) {
   if (args.message) list.push("--message", String(args.message));
   if (args.maxFileMB) list.push("--max-file-mb", String(args.maxFileMB));
   if (args.allowPublic) list.push("--allow-public");
+  else {
+    // 有些库本身就是「故意公开」的（比如门房自己、给用户的引导库）。
+    // 把它们的仓库名写进 config.publicRepos，就不必每次手动传 allowPublic=true。
+    try {
+      const { cfg } = await loadConfig(cfgDirArg);
+      const allowed = Array.isArray(cfg.publicRepos) ? cfg.publicRepos : [];
+      const dirs = [];
+      if (args.dir) dirs.push(resolve(String(args.dir)));
+      if (Array.isArray(args.dirs)) dirs.push(...args.dirs.map((value) => resolve(String(value))));
+      for (const dir of dirs) {
+        const info = await pluginInfo(dir);
+        if (info && allowed.includes(repoNameFor(info, cfg))) {
+          list.push("--allow-public");
+          break;
+        }
+      }
+    } catch {
+      /* 判不出来就按默认（要求私有）处理，让 push.mjs 自己去拒 */
+    }
+  }
   const r = await runScript("push.mjs", list, { cfgDir: cfgDirArg, extraEnv: tokenEnv(args.token), timeoutMs: 20 * 60 * 1000 });
   const data = r.json;
   const plugins = (data?.plugins || []).map((p) => ({
