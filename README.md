@@ -84,4 +84,11 @@ dsh plugin --profile desktop add "<插件目录绝对路径>"
 - 设备码登录需要你自己建一个 OAuth App（GitHub 没有「免注册登录」的公开通道）；不建就用 PAT。
 - tarball 下载走 GitHub API，私有库需要有效令牌；公开库匿名即可。
 
+## 更新记录
+
+- **v1.1.2** — 去掉 `package.json` 的 UTF-8 BOM（严格 `JSON.parse` 会报 `Unexpected token '\uFEFF'` 并回滚安装）；
+  `push` 前置检查会在上传前自动剥掉 BOM；README 的安装命令改成 API tarball 地址（`github.com/...` 直链会被 pnpm 当 git 依赖）。
+- **v1.1.1** — `config.publicRepos`：命中名单的仓库自动带 `--allow-public`，公开库不必每次手传参数。
+- **v1.1.0** — 设备码登录（Device Flow）+ PAT 兜底；设置页登录卡；`download`（tarball 拉取，不吃 git）。
+
 MIT License.
